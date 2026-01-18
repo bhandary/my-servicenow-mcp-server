@@ -298,7 +298,7 @@ class ServiceNowMCP:
                 auth: Authentication,
                 name: str = "ServiceNow MCP"):
         self.client = ServiceNowClient(instance_url, auth)
-        self.mcp = FastMCP(name, dependencies=[
+        self.mcp = FastMCP(name, host="0.0.0.0", dependencies=[
             "requests",
             "httpx", 
             "pydantic"
