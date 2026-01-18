@@ -1,34 +1,11 @@
-# Python bytecode
+# Python cache
 __pycache__/
-*.py[cod]
-*$py.class
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-*.egg
+# Python bytecode
+*.py[cod]
 
 # Virtual environments
-venv/
-env/
-ENV/
-
-# IDE files
-.idea/
-.vscode/
-*.swp
-*.swo
+.venv/
 
 # Environment variables
 .env
-
-# Logs
-*.log
-
-# Test files
-test_*.js
-
-# OS specific files
-.DS_Store
-Thumbs.db

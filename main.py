@@ -9,16 +9,13 @@ import os
 import json
 import asyncio
 import logging
-import re
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Any, Union, Literal, Tuple
+from typing import Dict, List, Optional, Any, Union, Literal
 
 import requests
 import httpx
 from pydantic import BaseModel, Field, field_validator
-
-from mcp_server_servicenow.nlp import NLPProcessor
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.utilities.logging import get_logger
@@ -232,15 +229,6 @@ class ServiceNowClient:
             
     async def get_record(self, table: str, sys_id: str) -> Dict[str, Any]:
         """Get a record by sys_id"""
-        if table == "incident" and sys_id.startswith("INC"):
-            # This is an incident number, not a sys_id
-            logger.warning(f"Attempted to use get_record with incident number instead of sys_id: {sys_id}")
-            logger.warning("Redirecting to get_incident_by_number method")
-            result = await self.get_incident_by_number(sys_id)
-            if result:
-                return {"result": result}
-            else:
-                raise ValueError(f"Incident not found: {sys_id}")
         return await self.request("GET", f"/api/now/table/{table}/{sys_id}")
         
     async def get_records(self, table: str, options: QueryOptions = None) -> Dict[str, Any]:
@@ -302,13 +290,6 @@ class ServiceNowClient:
         return result
 
 
-class ScriptUpdateModel(BaseModel):
-    """Model for updating a ServiceNow script"""
-    name: str = Field(..., description="The name of the script")
-    script: str = Field(..., description="The script content")
-    type: str = Field(..., description="The type of script (e.g., sys_script_include)")
-    description: Optional[str] = Field(None, description="Description of the script")
-
 class ServiceNowMCP:
     """ServiceNow MCP Server"""
     
@@ -341,11 +322,6 @@ class ServiceNowMCP:
         self.mcp.tool(name="add_comment")(self.add_comment)
         self.mcp.tool(name="add_work_notes")(self.add_work_notes)
         
-        # Register natural language tools
-        self.mcp.tool(name="natural_language_search")(self.natural_language_search)
-        self.mcp.tool(name="natural_language_update")(self.natural_language_update)
-        self.mcp.tool(name="update_script")(self.update_script)
-        
         # Register prompts
         self.mcp.prompt(name="analyze_incident")(self.incident_analysis_prompt)
         self.mcp.prompt(name="create_incident_prompt")(self.create_incident_prompt)
@@ -370,17 +346,10 @@ class ServiceNowMCP:
         
     async def get_incident(self, number: str) -> str:
         """Get a specific incident by number"""
-        try:
-            # Always use get_incident_by_number to query by incident number, not get_record
-            incident = await self.client.get_incident_by_number(number)
-            if incident:
-                return json.dumps({"result": incident}, indent=2)
-            else:
-                logger.error(f"No incident found with number: {number}")
-                return json.dumps({"error":{"message":"No Record found","detail":"Record doesn't exist or ACL restricts the record retrieval"},"status":"failure"})
-        except Exception as e:
-            logger.error(f"Error getting incident {number}: {str(e)}")
-            return json.dumps({"error":{"message":str(e),"detail":"Error occurred while retrieving the record"},"status":"failure"})
+        incident = await self.client.get_incident_by_number(number)
+        if incident:
+            return json.dumps({"result": incident}, indent=2)
+        return json.dumps({"result": "Incident not found"})
         
     async def list_users(self) -> str:
         """List users in ServiceNow"""
@@ -412,73 +381,28 @@ class ServiceNowMCP:
     
     # Tool handlers
     async def create_incident(self, 
-                     incident,
+                     incident: IncidentCreate,
                      ctx: Context = None) -> str:
         """
         Create a new incident in ServiceNow
         
         Args:
-            incident: The incident details to create - can be either an IncidentCreate object,
-                      a dictionary containing incident fields, or a string with the description
+            incident: The incident details to create
             ctx: Optional context object for progress reporting
         
         Returns:
             JSON response from ServiceNow
         """
-        # Handle different input types
-        if isinstance(incident, str):
-            # If a string was provided, treat it as the description and generate a short description
-            short_desc = incident[:50] + ('...' if len(incident) > 50 else '')
-            incident_data = {
-                "short_description": short_desc,
-                "description": incident
-            }
-            logger.info(f"Creating incident from string description: {short_desc}")
-        elif isinstance(incident, dict):
-            # Dictionary provided
-            incident_data = incident
-            logger.info(f"Creating incident from dictionary: {incident.get('short_description', 'No short description')}")
-        elif isinstance(incident, IncidentCreate):
-            # IncidentCreate model provided
-            incident_data = incident.dict(exclude_none=True)
-            logger.info(f"Creating incident from IncidentCreate: {incident.short_description}")
-        else:
-            error_message = f"Invalid incident type: {type(incident)}. Expected IncidentCreate, dict, or str."
-            logger.error(error_message)
-            return json.dumps({"error": error_message})
-
-        # Validate that required fields are present
-        if "short_description" not in incident_data and isinstance(incident, dict):
-            if "description" in incident_data:
-                # Auto-generate short description from description
-                desc = incident_data["description"]
-                incident_data["short_description"] = desc[:50] + ('...' if len(desc) > 50 else '')
-            else:
-                incident_data["short_description"] = "Incident created through API"
-        
-        if "description" not in incident_data and isinstance(incident, dict):
-            if "short_description" in incident_data:
-                incident_data["description"] = incident_data["short_description"]
-            else:
-                incident_data["description"] = "No description provided"
-    
-        # Log and create the incident
         if ctx:
-            await ctx.info(f"Creating incident: {incident_data.get('short_description', 'No short description')}")
-        
-        try:
-            result = await self.client.create_record("incident", incident_data)
+            await ctx.info(f"Creating incident: {incident.short_description}")
             
-            if ctx:
-                await ctx.info(f"Created incident: {result['result']['number']}")
-                
-            return json.dumps(result, indent=2)
-        except Exception as e:
-            error_message = f"Error creating incident: {str(e)}"
-            logger.error(error_message)
-            if ctx:
-                await ctx.error(error_message)
-            return json.dumps({"error": error_message})
+        data = incident.dict(exclude_none=True)
+        result = await self.client.create_record("incident", data)
+        
+        if ctx:
+            await ctx.info(f"Created incident: {result['result']['number']}")
+            
+        return json.dumps(result, indent=2)
         
     async def update_incident(self,
                      number: str,
@@ -664,159 +588,6 @@ class ServiceNowMCP:
         
         return json.dumps(result, indent=2)
     
-    # Natural language tools
-    async def natural_language_search(self,
-                             query: str,
-                             ctx: Context = None) -> str:
-        """
-        Search for records using natural language
-        
-        Examples:
-        - "find all incidents about SAP"
-        - "search for incidents related to email"
-        - "show me all incidents with high priority"
-        
-        Args:
-            query: Natural language query
-            ctx: Optional context object for progress reporting
-            
-        Returns:
-            JSON response containing matching records
-        """
-        if ctx:
-            await ctx.info(f"Processing natural language query: {query}")
-            
-        # Parse the query
-        search_params = NLPProcessor.parse_search_query(query)
-        
-        if ctx:
-            await ctx.info(f"Searching {search_params['table']} with query: {search_params['query']}")
-        
-        # Perform the search
-        options = QueryOptions(
-            limit=search_params['limit'],
-            query=search_params['query']
-        )
-        
-        result = await self.client.get_records(search_params['table'], options)
-        return json.dumps(result, indent=2)
-    
-    async def natural_language_update(self,
-                              command: str,
-                              ctx: Context = None) -> str:
-        """
-        Update a record using natural language
-        
-        Examples:
-        - "Update incident INC0010001 saying I'm working on it"
-        - "Set incident INC0010002 to in progress"
-        - "Close incident INC0010003 with resolution: fixed the issue"
-        
-        Args:
-            command: Natural language update command
-            ctx: Optional context object for progress reporting
-            
-        Returns:
-            JSON response from ServiceNow
-        """
-        if ctx:
-            await ctx.info(f"Processing natural language update: {command}")
-            
-        try:
-            # Parse the command
-            record_number, updates = NLPProcessor.parse_update_command(command)
-            
-            if ctx:
-                await ctx.info(f"Updating {record_number} with: {updates}")
-            
-            # Get the record
-            if record_number.startswith("INC"):
-                incident = await self.client.get_incident_by_number(record_number)
-                if not incident:
-                    error_message = f"Incident {record_number} not found"
-                    if ctx:
-                        await ctx.error(error_message)
-                    return json.dumps({"error": error_message})
-                
-                sys_id = incident['sys_id']
-                table = "incident"
-            else:
-                # Handle other record types if needed
-                error_message = f"Record type not supported: {record_number}"
-                if ctx:
-                    await ctx.error(error_message)
-                return json.dumps({"error": error_message})
-            
-            # Update the record
-            result = await self.client.update_record(table, sys_id, updates)
-            return json.dumps(result, indent=2)
-            
-        except ValueError as e:
-            error_message = str(e)
-            if ctx:
-                await ctx.error(error_message)
-            return json.dumps({"error": error_message})
-    
-    async def update_script(self,
-                   script_update: ScriptUpdateModel,
-                   ctx: Context = None) -> str:
-        """
-        Update a ServiceNow script
-        
-        Args:
-            script_update: The script update details
-            ctx: Optional context object for progress reporting
-            
-        Returns:
-            JSON response from ServiceNow
-        """
-        if ctx:
-            await ctx.info(f"Updating script: {script_update.name}")
-            
-        # Search for the script by name
-        table = script_update.type
-        query = f"name={script_update.name}"
-        
-        options = QueryOptions(
-            limit=1,
-            query=query
-        )
-        
-        result = await self.client.get_records(table, options)
-        
-        if not result.get("result") or len(result["result"]) == 0:
-            # Script doesn't exist, create it
-            if ctx:
-                await ctx.info(f"Script not found, creating new script: {script_update.name}")
-                
-            data = {
-                "name": script_update.name,
-                "script": script_update.script
-            }
-            
-            if script_update.description:
-                data["description"] = script_update.description
-                
-            result = await self.client.create_record(table, data)
-        else:
-            # Script exists, update it
-            script = result["result"][0]
-            sys_id = script["sys_id"]
-            
-            if ctx:
-                await ctx.info(f"Updating existing script: {script_update.name} ({sys_id})")
-                
-            data = {
-                "script": script_update.script
-            }
-            
-            if script_update.description:
-                data["description"] = script_update.description
-                
-            result = await self.client.update_record(table, sys_id, data)
-            
-        return json.dumps(result, indent=2)
-    
     # Prompt templates
     def incident_analysis_prompt(self, incident_number: str) -> str:
         """Create a prompt to analyze a ServiceNow incident
@@ -877,3 +648,46 @@ def create_oauth_auth(client_id: str, client_secret: str,
                      instance_url: str) -> OAuthAuth:
     """Create OAuthAuth object for ServiceNow authentication"""
     return OAuthAuth(client_id, client_secret, username, password, instance_url)
+
+# Main function for running the server from the command line
+def main():
+    """Run the ServiceNow MCP server from the command line"""
+    import argparse
+    import sys
+    
+    parser = argparse.ArgumentParser(description="ServiceNow MCP Server")
+    parser.add_argument("--url", help="ServiceNow instance URL", default=os.environ.get("SERVICENOW_INSTANCE_URL"))
+    parser.add_argument("--transport", help="Transport protocol (stdio or sse or streamable-http)", default="streamable-http", choices=["stdio", "sse", "streamable-http"])
+    
+    # Authentication options
+    auth_group = parser.add_argument_group("Authentication")
+    auth_group.add_argument("--username", help="ServiceNow username", default=os.environ.get("SERVICENOW_USERNAME"))
+    auth_group.add_argument("--password", help="ServiceNow password", default=os.environ.get("SERVICENOW_PASSWORD"))
+    #auth_group.add_argument("--token", help="ServiceNow token", default=os.environ.get("SERVICENOW_TOKEN"))
+    #auth_group.add_argument("--client-id", help="OAuth client ID", default=os.environ.get("SERVICENOW_CLIENT_ID"))
+    #auth_group.add_argument("--client-secret", help="OAuth client secret", default=os.environ.get("SERVICENOW_CLIENT_SECRET"))
+    
+    args = parser.parse_args()
+    
+    # Check required parameters
+    if not args.url:
+        print("Error: ServiceNow instance URL is required")
+        print("Set SERVICENOW_INSTANCE_URL environment variable or use --url")
+        sys.exit(1)
+    
+    # Determine authentication method
+    auth = None
+    if args.username and args.password:
+        auth = create_basic_auth(args.username, args.password)
+    else:
+        print("Error: Authentication credentials required")
+        print("Either provide username/password, token, or OAuth credentials")
+        sys.exit(1)
+    
+    # Create and run the server
+    server = ServiceNowMCP(instance_url=args.url, auth=auth)
+    server.run(transport=args.transport)
+
+# Entry point
+if __name__ == "__main__":
+    main()
